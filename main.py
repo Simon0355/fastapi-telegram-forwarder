@@ -1,41 +1,116 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from telethon.sync import TelegramClient
+import time
 import asyncio
+from telethon.sync import TelegramClient
 
-app = FastAPI()
+class TelegramForwarder:
+    def __init__(self, api_id, api_hash, phone_number):
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.phone_number = phone_number
+        self.client = TelegramClient('session_' + phone_number, api_id, api_hash)
 
-class Message(BaseModel):
-    chat_id: int
-    text: str
+    async def list_chats(self):
+        await self.client.connect()
+        if not await self.client.is_user_authorized():
+            await self.client.send_code_request(self.phone_number)
+            await self.client.sign_in(self.phone_number, input('Enter the code: '))
 
-# Telegram API credentials
-api_id = "YOUR_API_ID"  # Erstat med din API ID
-api_hash = "YOUR_API_HASH"  # Erstat med din API Hash
-phone_number = "YOUR_PHONE_NUMBER"  # Erstat med dit telefonnummer
+        dialogs = await self.client.get_dialogs()
+        chats_file = open(f"chats_of_{self.phone_number}.txt", "w")
+        for dialog in dialogs:
+            print(f"Chat ID: {dialog.id}, Title: {dialog.title}")
+            chats_file.write(f"Chat ID: {dialog.id}, Title: {dialog.title} \n")
+          
+        chats_file.close()
+        print("List of groups printed successfully!")
 
-client = TelegramClient('session_name', api_id, api_hash)
+    async def forward_messages_to_groups(self, source_chat_ids, destination_group_ids, keywords):
+        await self.client.connect()
+        if not await self.client.is_user_authorized():
+            await self.client.send_code_request(self.phone_number)
+            await self.client.sign_in(self.phone_number, input('Enter the code: '))
 
-@app.on_event("startup")
-async def startup_event():
-    await client.start()
+        last_message_ids = {chat_id: (await self.client.get_messages(chat_id, limit=1))[0].id for chat_id in source_chat_ids}
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await client.disconnect()
+        while True:
+            print("Checking for messages and forwarding them...")
+            for source_chat_id in source_chat_ids:
+                messages = await self.client.get_messages(source_chat_id, min_id=last_message_ids[source_chat_id], limit=None)
 
-@app.post("/forward/")
-async def forward_message(message: Message):
-    # Her tilføjer du logikken til at forwarde beskeder
+                for message in reversed(messages):
+                    if keywords:
+                        if message.text and any(keyword in message.text.lower() for keyword in keywords):
+                            print(f"Message from {source_chat_id} contains a keyword: {message.text}")
+                            for destination_group_id in destination_group_ids:
+                                await self.client.send_message(destination_group_id, message.text)
+                                print(f"Message forwarded to group {destination_group_id}")
+
+                    else:
+                        for destination_group_id in destination_group_ids:
+                            await self.client.send_message(destination_group_id, message.text)
+                            print(f"Message forwarded to group {destination_group_id}")
+
+                    last_message_ids[source_chat_id] = max(last_message_ids[source_chat_id], message.id)
+
+            await asyncio.sleep(5)
+
+def read_credentials():
     try:
-        await client.send_message(message.chat_id, message.text)
-        return {"status": "Message forwarded", "chat_id": message.chat_id, "text": message.text}
-    except Exception as e:
-        return {"status": "Error", "message": str(e)}
+        with open("credentials.txt", "r") as file:
+            lines = file.readlines()
+            api_id = lines[0].strip()
+            api_hash = lines[1].strip()
+            phone_number = lines[2].strip()
+            return api_id, api_hash, phone_number
+    except FileNotFoundError:
+        print("Credentials file not found.")
+        return None, None, None
 
-# Tilføj en route for at liste chat-id'er (valgfrit)
-@app.get("/chats/")
-async def list_chats():
-    dialogs = await client.get_dialogs()
-    chat_list = [{"id": dialog.id, "title": dialog.title} for dialog in dialogs]
-    return chat_list
+def write_credentials(api_id, api_hash, phone_number):
+    with open("credentials.txt", "w") as file:
+        file.write(api_id + "\n")
+        file.write(api_hash + "\n")
+        file.write(phone_number + "\n")
+
+async def main():
+    api_id, api_hash, phone_number = read_credentials()
+    if api_id is None or api_hash is None or phone_number is None:
+        api_id = input("Enter your API ID: ")
+        api_hash = input("Enter your API Hash: ")
+        phone_number = input("Enter your phone number: ")
+        write_credentials(api_id, api_hash, phone_number)
+
+    forwarder = TelegramForwarder(api_id, api_hash, phone_number)
+    
+    print("Choose an option:")
+    print("1. List Chats")
+    print("2. Forward Messages")
+    
+    choice = input("Enter your choice: ")
+    
+    if choice == "1":
+        await forwarder.list_chats()
+    elif choice == "2":
+        num_sources = int(input("How many source groups do you want to fetch messages from? "))
+        source_chat_ids = []
+        
+        for i in range(num_sources):
+            chat_id = int(input(f"Enter the source chat ID {i + 1}: "))
+            source_chat_ids.append(chat_id)
+
+        num_destinations = int(input("How many destination groups do you want to send messages to? "))
+        destination_group_ids = []
+        
+        for i in range(num_destinations):
+            group_id = int(input(f"Enter the destination group ID {i + 1}: "))
+            destination_group_ids.append(group_id)
+
+        print("Enter keywords if you want to forward messages with specific keywords, or leave blank to forward every message!")
+        keywords = input("Put keywords (comma separated if multiple, or leave blank): ").split(",")
+        
+        await forwarder.forward_messages_to_groups(source_chat_ids, destination_group_ids, keywords)
+    else:
+        print("Invalid choice")
+
+if __name__ == "__main__":
+    asyncio.run(main())
